@@ -1,0 +1,7 @@
+run "julia", then press ] to enter the pkg manager
+update
+add Images
+add TestImages
+add ImageView
+backspace
+exit()
