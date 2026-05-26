@@ -7,6 +7,8 @@ Implements forward Euler on a general ODE system y' = Ay + b(t) with time step
 'dt', where 'A' is an m*m matrix, 'b' is a function of t, and 'y0' is an initial 
 condition on the time interval 0...'T'.
 
+change 
+
 Returns vector 't' and matrix 'Y' containing the time grid and numerical
 approximation, respectively.
 """
