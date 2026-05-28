@@ -34,21 +34,22 @@ end
 # ------------------------------------------------------------
 # Solve u_t = k (u_xx + u_yy) on a square domain with Neumann BCs
 # Returns: U (vector of solution snapshots), dt
-# L i think is the time?
 # N i think is the size of the domain NxN?
 # ------------------------------------------------------------
-function smoothing(L, N, k, u0)
+
+function smoothing(L, N, k, u0, T=0.1)
+    save_per = 100
 
     dx = L / (N - 1)
     dy = dx
     h = dx
 
     dt = 0.24 * h^2 / k # so the forward euler is stable
-    nt = 300
+    nt = Int(round(T/dt))
 
     u = copy(u0)
     u_new = similar(u0)
-    U = Vector{Matrix{Float64}}(undef, nt)
+    U = Vector{Matrix{Float64}}()
 
     for n in 1:nt
         apply_neumann!(u)
@@ -63,62 +64,12 @@ function smoothing(L, N, k, u0)
         apply_neumann!(u_new)
         #apply_dirchlet!(u_new)
 
-        U[n] = copy(u_new)
+        if n % save_per == 0
+            push!(U, copy(u_new))
+        end
+
         u, u_new = u_new, u
     end
 
-    return U, dt
+    return U, dt * save_per
 end
-
-
-# ------------------------------------------------------------
-# Problem setup
-# ------------------------------------------------------------
-L = 2.0
-N = 51
-
-x = range(0, L, length=N)
-y = range(0, L, length=N)
-
-# Gaussian initial condition
-A = 20.0        # height of the bump
-sig = 0.5        # width (smaller = sharper)
-
-u0 = [A * exp(-((x[i] - L / 2)^2 + (y[j] - L / 2)^2) / (2sig^2))
-      for i in 1:N, j in 1:N]
-
-U, dt = smoothing(L, N, 1.0, u0)
-
-
-# ------------------------------------------------------------
-# Static plot of final state
-# ------------------------------------------------------------
-heatmap(
-    x, y, U[end]',
-    aspect_ratio=1,
-    xlabel="x",
-    ylabel="y",
-    title="Temperature Field u(x,y)",
-    c=:viridis,
-    colorbar=true,
-)
-
-
-# ------------------------------------------------------------
-# Animation
-# ------------------------------------------------------------
-
-clims = extrema(U[1])
-
-anim = @animate for n in 1:length(U)
-    heatmap(
-        x, y, U[n]',
-        aspect_ratio=1,
-        c=:viridis,
-        clims=clims,                     # ← freezes the color scale
-        title="t = $(round(n*dt, digits=3))",
-    )
-end
-
-
-gif(anim, "heat2d.gif", fps=20)
