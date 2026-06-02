@@ -3,5 +3,6 @@ update
 add Images
 add TestImages
 add ImageView
+add CUDA
 backspace
 exit()

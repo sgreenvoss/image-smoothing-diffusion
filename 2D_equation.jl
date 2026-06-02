@@ -26,14 +26,7 @@ function apply_dirichlet!(u)
 end
 
 # ------------------------------------------------------------
-<<<<<<< HEAD
-# Build 2D Laplacian with BCs
-=======
-# Solve u_t = k (u_xx + u_yy) on a square domain with Neumann BCs
-# Returns: U (vector of solution snapshots), dt
-# L i think is the time?
-# N i think is the size of the domain NxN?
->>>>>>> 99c855e666e4140447da4be97a5f959ef28dd0ef
+
 # ------------------------------------------------------------
 """
     laplacian_neumann(N, h)
