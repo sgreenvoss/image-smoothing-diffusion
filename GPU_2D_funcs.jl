@@ -2,6 +2,9 @@ using LinearAlgebra
 using Plots
 using SparseArrays
 using CUDA
+using CUDA.CUSOLVER
+using CUDA.CUSPARSE
+using Krylov
 using TestImages
 using Statistics
 
@@ -38,7 +41,7 @@ end
 """
     laplacian_neumann(N, h)
 
-Constructs the 2D Laplacian with Neumann boundary conditions.
+Constructs the 2D Laplacian with Neumann boundary conditions on GPU.
 
 # Arguments
 - `N::Int`    — number of grid points in each spatial direction
@@ -144,124 +147,134 @@ function laplacian_neumann(N, h)
     return l_cpu
 end
 
+
 # ------------------------------------------------------------
-# Backward Euler smoothing (implicit, with LU factorization)
+# Backward Euler smoothing — GPU LU solve via CUSOLVER
 # ------------------------------------------------------------
 """
-    smoothing_backward(L, N, k, u0, dt; nt=300)
-
-Solves the 2D heat equation `u_t = k ∇²u` using the implicit Backward
-Euler method. The linear system
-
+    smoothing_backward(L, N, k, u0, dt; nt=300, target=0.009, gif_path=nothing, gif_stride=10)
+ 
+Solves the 2D heat equation `u_t = k ∇²u` using implicit Backward Euler:
+ 
     (I - dt*k*L) u^{n+1} = u^n
-
-is solved efficiently using a precomputed LU factorization of the
-system matrix. This method is unconditionally stable and suitable for
-larger time steps.
-
+ 
+The system matrix is kept on GPU and solved each step via CUSOLVER's sparse LU.
+This avoids the CPU↔GPU round-trip that the serial version pays on every step.
+ 
+Optionally saves a GIF of the solution evolving over time.
+ 
 # Arguments
-- `L::Float`     — physical domain length
-- `N::Int`       — number of grid points per dimension
-- `k::Float`     — diffusion coefficient
-- `u0::Matrix`   — initial condition (N by N)
-- `dt::Float`    — time step
-- `nt::Int`      — number of time steps (default: 300)
-
+- `L::Float`        — physical domain length
+- `N::Int`          — number of grid points per dimension
+- `k::Float`        — diffusion coefficient
+- `u0::Matrix`      — initial condition (NxN)
+- `dt::Float`       — time step
+- `nt::Int`         — number of time steps (default: 300)
+- `target::Float`   — std threshold for smoothness detection (default: 0.009)
+- `stdev::Bool`     — whether it should create an array of standard deviations (default: true)
+- `gif_path`        — if a String path is given, saves a GIF there; nothing skips it
+- `gif_stride::Int` — save every nth frame to the GIF (default: 10)
+ 
 # Returns
-- `U::Vector{Matrix}` — solution snapshots over time
-- `dt::Float`         — time step (returned unchanged)
+- `stdevs::Vector{Float64}` — per-step standard deviation of the solution
+- `dt::Float`               — time step (returned unchanged)
 """
-
-function smoothing_backward(L, N, k, u0, dt, nt=300, target=0.009)
-    checking = true
+function smoothing_backward_gpu(L, N, k, u0, dt, nt=300, target=0.009;
+                             stdev=true, gif_path=nothing, gif_stride=10)
     dx = L / (N - 1)
     stdevs = Float64[]
-
-    # Build Laplacian and system matrix
-    Lap = laplacian_neumann(N, dx)
-
-    Ibig = sparse(I, N^2, N^2)
-    A = Ibig - dt * k * Lap
-
-    F = lu(A)
-
-    # Work with vectorized state
-    u_vec = Float64.(vec(copy(u0)))
-    U = Vector{Matrix{Float64}}(undef, nt)
-
+ 
+    Lap_gpu = laplacian_neumann(N, dx)          
+    Lap_cpu = SparseMatrixCSC(Lap_gpu)         
+    NN = N * N
+    Ibig = sparse(I, NN, NN)
+    A_cpu = Ibig - dt * k * Lap_cpu
+    A_gpu = CuSparseMatrixCSR(A_cpu)          
+ 
+    u_gpu = CuArray(Float64.(vec(copy(u0))))
+ 
+    do_gif = gif_path !== nothing
+    local anim
+    if do_gif
+        anim = Animation()
+        clims = extrema(Float64.(u0))
+        xr = range(0, L, length=N)
+        yr = range(0, L, length=N)
+    end
+ 
     for n in 1:nt
-        u_new_vec = F \ u_vec
-        u_mat = reshape(u_new_vec, N, N)
-        # remove this when done with plotting stdevs
-        push!(stdevs, std(u_mat))
-        if checking && is_smooth(u_mat, target)
-            println("Reached smooth state at step ", n, "at time ", n*dt)
-            checking = false
+        u_gpu, _ = Krylov.cg(A_gpu, u_gpu)
+        
+        if stdev
+            push!(stdevs, std(Array(u_gpu)))
         end
 
-        U[n] = copy(u_mat)
-        u_vec = vec(u_mat)
+        if do_gif && n % gif_stride == 0
+            u_mat = Array(u_gpu)  
+            heatmap(xr, yr, u_mat',
+                aspect_ratio=1,
+                c=:viridis,
+                clims=clims,
+                title="t = $(round(n*dt, digits=3))",
+                axis=false,
+                colorbar=false,
+                fps=10)
+            frame(anim)
+        end
+    end
+ 
+    if do_gif
+        gif(anim, gif_path, fps=20)
+        println("Saved GIF → $gif_path")
+    end
+ 
+    return stdevs, dt
+end
+
+function smoothing_backward_gpu_no_extra(L, N, k, u0, dt; nt=300)
+    dx = L / (N - 1)
+    stdevs = Float64[]
+ 
+    # --- Build system matrix entirely on GPU ---
+    Lap_gpu = laplacian_neumann(N, dx)          
+    Lap_cpu = SparseMatrixCSC(Lap_gpu)         
+    NN = N * N
+    Ibig = sparse(I, NN, NN)
+    A_cpu = Ibig - dt * k * Lap_cpu
+    A_gpu = CuSparseMatrixCSR(A_cpu)          
+ 
+    # Initial state on GPU
+    u_gpu = CuArray(Float64.(vec(copy(u0))))
+ 
+    for n in 1:nt
+        u_gpu, _ = Krylov.cg(A_gpu, u_gpu)
     end
 
-    # remove stdevs when one with plotting stdev
-    return U, dt, stdevs 
+    return dt
 end
 
-function stdevs_from_img(image_name, size; d_t=0.001, target=0.001, n_t=100)
-    img = testimage(image_name)
-    img = rotr90(img)
-    N = size 
-    L = 2.0 
+function run_test()
+    images = ["resolution_test_512", "bark_he_512", "cameraman", "mandril_gray"]
 
-    U, dt, stdevs = smoothing_backward(L, N, 1.0, img, d_t, n_t, target)
-
-    return stdevs
+    dt = 0.001
+    nt = 500
+    final_t = dt * nt
+    x = range(0, final_t, length=nt)
+    plt = plot()
+    
+    mkpath("gifs")
+    
+    for image in images
+        println("Processing: $image")
+        img = testimage(image)
+        img = rotr90(img)
+        N = 512
+        L = 2.0
+    
+        _, _ = smoothing_backward_gpu(L, N, 1.0, img, dt, nt, 0.009;
+                                        gif_path="new_gifs/$image.gif",
+                                        gif_stride=2, stdev=false)
+    end
 end
-# ------------------------------------------------------------
-# Problem setup
-# ------------------------------------------------------------
-images = ["resolution_test_512", "bark_he_512", "cameraman", "mandril_gray"]
 
-dt = 0.001
-nt = 500
-final_t = dt * nt 
-x = range(0, final_t, length=nt)
-plt = plot()
-
-for image in images
-    s = stdevs_from_img(image, 512, n_t=nt)
-    plot!(x, s, label=image)
-end
-hline!([0.009], label="Smoothing threshold", ls=:dot)
-xlabel!("Time (s)")
-ylabel!("Standard deviation")
-savefig("all_devs_with_thresh.png")
-
-# img = testimage("cameraman")
-# img = rotr90(img)
-# N = 512
-# L = 2.0
-
-# nt = 100
-
-# U, dt, stdevs = smoothing_backward(L, N, 1.0, img, 0.001, 500)
-
-# clims = extrema(U[1])
-
-# xr = range(0, L, length=N)
-# yr = range(0, L, length=N)
-
-
-# anim = @animate for n in 1:length(U)
-#     heatmap(
-#         xr, yr, U[n]',
-#         aspect_ratio=1,
-#         c=:viridis,
-#         clims=clims,                     # ← freezes the color scale
-#         title="t = $(round(n*dt, digits=3))",
-#         axis=false,
-#         colorbar=false,
-#     )
-# end
-
-# gif(anim, "gifs/cameraman.gif", fps=20)
+run_test()
